@@ -7,6 +7,8 @@
 
 # -- meta --
 !.gitignore
+!README.md
+!LICENSE
 
 # -- src files --
 !*.py
