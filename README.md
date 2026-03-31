@@ -2,7 +2,7 @@
 
 **Diff-Blup** is a web-based _differential_ trace visualization tool.
 
-![](example/ex1.png)
+![](examples/ex1.png)
 
 [![BSD-3 License](https://img.shields.io/badge/License-BSD3-yellow.svg)](https://opensource.org/license/bsd-3-clause)
 
