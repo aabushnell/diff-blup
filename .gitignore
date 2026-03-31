@@ -12,7 +12,7 @@
 !README.md
 !LICENSE
 !requirements.txt
-!examples/
+!examples/*
 
 # -- src files --
 !*.py
