@@ -15,6 +15,9 @@ This repo is currently heavily under construction.
 When running Blup for the first time, it automatically install
 dependencies. All you need is `python`.
 
+The Blup shell script will try to locate/create a `.venv` virtual environment folder.
+The desired enclosing folder for the `.venv` folder can be set with the `BLUP_CONFIG` environment variable.
+
 You may need to install the `python3-tk` package that may not be installed by pip.
 
 ## Running Blup-Diff locally
