@@ -20,7 +20,7 @@ The desired enclosing folder for the `.venv` folder can be set with the `BLUP_CO
 
 You may need to install the `python3-tk` package that may not be installed by pip.
 
-## Running Blup-Diff locally
+## Running Diff-Blup locally
 
 You can visualize traces stored on your local machine by running:
 
