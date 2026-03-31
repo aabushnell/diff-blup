@@ -7,9 +7,12 @@
 
 # -- meta --
 !.gitignore
+
+# -- docs --
 !README.md
 !LICENSE
 !requirements.txt
+!examples/
 
 # -- src files --
 !*.py
