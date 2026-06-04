@@ -4,6 +4,7 @@ bokeh_options=""
 port=5006
 
 PREFIX=$(dirname $(realpath $0))
+APP_DIR="${PREFIX}/blup_src"
 
 if [ -z "$BLUP_CONFIG" ]; then
   BLUP_CONFIG="$HOME/.blup"
@@ -145,14 +146,16 @@ fi
 # Run the server
 ###########################
 
-echo ""
+cmd=(bokeh serve "$APP_DIR" "--port=${port}")
 
 if [ "$server_mode" = n ]; then
-  bokeh_options="$bokeh_options --show"
+  cmd+=(--show)
 fi
 
-if [ $# -gt 0 ]; then
-  args="--args $@"
-fi
+cmd+=(--args "$@")
 
-bokeh serve $bokeh_options "${PREFIX}/blup_server.py" --port=$port $args
+printf 'Running:'
+printf ' %q' "${cmd[@]}"
+printf '\n'
+
+exec "${cmd[@]}"

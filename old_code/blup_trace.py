@@ -91,6 +91,57 @@ def process_trace(df) -> tuple[pd.DataFrame, list, list]:
     df = compute_depth(df)
     return df, threads, functions
 
+def read_trace_pallas(filename: str, max_depth: int) -> pd.DataFrame:
+    import pallas_trace as pallas
+
+    trace: pallas.Trace = pallas.open_trace(filename)
+    sequences = []
+
+    for archive in trace.archives:
+        for thread in archive.threads:
+            thread_name = trace.locations[thread.id].name
+            thread_reader: pallas.ThreadReader = thread.reader()
+
+            while not thread_reader.isEndOfTrace():
+                (token, iteration) = thread_reader.pollCurToken()
+
+                # Compute current call depth from the callstack
+                depth = len([
+                    t for (t, _) in thread_reader.callstack[:-1]
+                    if isinstance(t, pallas.Sequence)
+                    and t.type == pallas.SequenceType.SEQUENCE_BLOCK
+                ])
+
+                if depth > max_depth:
+                    while thread_reader.exitIfEndOfBlock(True, True):
+                        pass
+                    thread_reader.moveToNextToken(False, False)
+                    continue
+
+                if not isinstance(token, pallas.Sequence):
+                    thread_reader.moveToNextToken(True, True)
+                    continue
+
+                thread_reader.moveToNextToken(True, False)
+
+                if token.type == pallas.SequenceType.SEQUENCE_BLOCK:
+                    s = {}
+                    s["start"]    = token.timestamps[iteration]
+                    s["duration"] = token.durations[iteration]
+                    s["finish"]   = s["start"] + s["duration"]
+                    s["thread"]   = thread_name
+                    s["function"] = token.guessName()
+                    s["depth"]    = depth
+                    sequences.append(s)
+
+                thread_reader.moveToNextToken(True, True)
+
+    df = pd.DataFrame(sequences)
+    empty_df = create_empty_df()
+    df = pd.concat([empty_df, df]).fillna(0)
+    df = df.astype(empty_df.dtypes)
+    return df
+
 def read_trace_otf2(trace_name) -> pd.DataFrame:
     import otf2
     sequences=[]
@@ -113,11 +164,11 @@ def read_trace_otf2(trace_name) -> pd.DataFrame:
                     s["depth"]=ongoing_sequences[location.name][-1]["depth"]+1
                     ongoing_sequences[location.name].append(s)
             elif isinstance(event, otf2.events.Leave):
-                if len(ongoing_sequences[location.name]) > 0:
-                    s=ongoing_sequences[location.name][-1]
+                if ongoing_sequences.get(location.name):
+                    s = ongoing_sequences[location.name][-1]
                     del ongoing_sequences[location.name][-1]
-                    s["finish"]=event.time
-                    s["duration"]=s["finish"]-s["start"]
+                    s["finish"]   = event.time
+                    s["duration"] = s["finish"] - s["start"]
                     sequences.append(s)
 
     df=pd.DataFrame(sequences)
@@ -129,7 +180,7 @@ def read_trace_otf2(trace_name) -> pd.DataFrame:
 
     return df
 
-def read_trace(file_path):
+def read_trace(file_path, max_depth=100):
     t1 = datetime.datetime.now()
     file_name, file_extension = os.path.splitext(file_path)
 
@@ -138,8 +189,7 @@ def read_trace(file_path):
         raise NotImplementedError
         # df = read_trace_csv(file_path)
     elif file_extension == ".pallas":
-        raise NotImplementedError
-        # df = read_trace_pallas(file_path)
+        df = read_trace_pallas(file_path, max_depth)
     elif file_extension == ".otf2":
         df = read_trace_otf2(file_path)
     else:
@@ -176,11 +226,13 @@ def build_quanta_df(
 
             overlap["eff_start"]  = overlap["start"].clip(lower=qs,  upper=qe) # type: ignore
             overlap["eff_finish"] = overlap["finish"].clip(lower=qs, upper=qe) # type: ignore
+            overlap = overlap.dropna(subset=["depth"])
 
             events: list[tuple] = []
             for _, row in overlap.iterrows():
-                events.append((row["eff_start"],  1, "enter", row["function"], int(row["depth"])))
-                events.append((row["eff_finish"], 0, "leave", row["function"], int(row["depth"])))
+                d = int(row["depth"])
+                events.append((row["eff_start"],  1, "enter", row["function"], d))
+                events.append((row["eff_finish"], 0, "leave", row["function"], d))
             events.sort(key=lambda e: (e[0], e[1]))
 
             active:    dict[int, str]    = {}
@@ -225,7 +277,30 @@ class BlupTrace:
             self.df, self.threads, self.functions = (
                 process_trace(df_read)
             )
+
+            counts = (
+                self.df.groupby(["function", "thread"])
+                .size()
+                .reset_index(name="count")
+                .sort_values(["function", "thread"])
+            )
+            total_per_func = counts.groupby("function")["count"].sum()
+            print(f"\n[blup] Trace loaded: {file_path}")
+            print(f"[blup] {len(self.functions)} functions, {len(self.threads)} threads, "
+                f"{len(self.df)} total call records\n")
+            print(f"{'Function':<40} {'Total':>8}  per-thread breakdown")
+            print("-" * 72)
+            for func in sorted(self.functions):
+                thread_counts = counts[counts["function"] == func]
+                breakdown = "  ".join(
+                    f"{row['thread']}:{row['count']}"
+                    for _, row in thread_counts.iterrows()
+                )
+                print(f"{func:<40} {int(total_per_func[func]):>8}  {breakdown}")
+            print()
+
             self._func_stats_cache: dict[str, dict] = {}
+            self._mean_subtree_cache: dict[tuple[str, str], pd.DataFrame] = {}
             self._quanta_cache: dict[tuple, pd.DataFrame] = {}
 
     def get_durations(self, func: str) -> np.ndarray:
@@ -254,6 +329,17 @@ class BlupTrace:
         )
         return list(self.df[mask].sort_values("start").index) # type: ignore
 
+    def get_instance_count(self, func: str, thread: str) -> int:
+        return len(self.get_call_instances(func, thread))
+
+    def get_median_instance(self, func: str, thread: str) -> int | None:
+        instances = self.get_call_instances(func, thread)
+        if not instances:
+            return None
+        durations = self.df.loc[instances, "duration"].to_numpy(dtype=np.float64)
+        median_dur = np.median(durations)
+        return instances[int(np.argmin(np.abs(durations - median_dur)))]
+
     def get_call_subtree(self, idx: int) -> pd.DataFrame:
         row = self.df.loc[idx]
         mask = (
@@ -277,6 +363,152 @@ class BlupTrace:
             mask = mask | submask
         return mask
 
+    def build_mean_subtree(self, func: str, thread: str) -> pd.DataFrame:
+        cache_key = (func, thread)
+        if cache_key in self._mean_subtree_cache:
+            return self._mean_subtree_cache[cache_key]
+
+        instances = self.get_call_instances(func, thread)
+        if not instances:
+            return pd.DataFrame()
+
+        root_durations_ns: list[int] = []
+        node_props: dict[tuple, list[tuple[float, float]]] = defaultdict(list)
+        path_to_func:  dict[tuple, str]            = {}
+        path_to_depth: dict[tuple, int]            = {}
+        parent_of:     dict[tuple, tuple | None]   = {}
+
+        for idx in instances:
+            root_row = self.df.loc[idx]
+            root_dur_ns = root_row["duration"].value
+            if root_dur_ns <= 0:
+                continue
+            root_durations_ns.append(root_dur_ns)
+
+            sub = self.get_call_subtree(idx).copy()
+            root_start_val = sub["start"].min().value
+            sub["_s"] = sub["start"].apply(lambda x: x.value) - root_start_val
+            sub["_f"] = sub["finish"].apply(lambda x: x.value) - root_start_val
+            sub["_d"] = sub["duration"].apply(lambda x: x.value)
+            sub = sub.sort_values("_s").reset_index(drop=True)
+
+            stack: list[tuple[tuple, int]] = []   # (path, depth)
+            row_path: list[tuple | None] = [None] * len(sub)
+
+            for i, row in sub.iterrows():
+                dep = int(row["depth"])
+                fn  = str(row["function"])
+                while stack and stack[-1][1] >= dep:
+                    stack.pop()
+                parent_path: tuple | None = stack[-1][0] if stack else None
+                path = parent_path + (fn,) if parent_path is not None else (fn,)
+                row_path[i] = path        # type: ignore
+                path_to_func[path] = fn
+                path_to_depth[path] = dep
+                parent_of[path] = parent_path
+                stack.append((path, dep))
+
+            path_first_start: dict[tuple, int] = {}
+            path_total_dur:   dict[tuple, int] = {}
+
+            for i, row in sub.iterrows():
+                path = row_path[i]  # type: ignore
+                if path is None:
+                    continue
+                s = int(row["_s"])
+                dur = int(row["_d"])
+                if path not in path_first_start or s < path_first_start[path]:
+                    path_first_start[path] = s
+                path_total_dur[path] = path_total_dur.get(path, 0) + dur
+
+            seen: set[tuple] = set()
+            for path, total_dur in path_total_dur.items():
+                parent = parent_of.get(path)
+                if parent is None:
+                    node_props[path].append((0.0, 1.0))
+                else:
+                    parent_dur = path_total_dur.get(parent, 0)
+                    if parent_dur <= 0:
+                        node_props[path].append((0.0, 0.0))
+                    else:
+                        parent_start  = path_first_start.get(parent, 0)
+                        child_start   = path_first_start[path]
+                        offset_prop   = (child_start - parent_start) / parent_dur
+                        dur_prop      = total_dur / parent_dur
+                        node_props[path].append((offset_prop, dur_prop))
+                seen.add(path)
+
+            for path in node_props:
+                if path not in seen:
+                    node_props[path].append((0.0, 0.0))
+
+        if not root_durations_ns:
+            return pd.DataFrame()
+
+        n_valid = len(root_durations_ns)
+        mean_root_dur_ns = int(np.mean(root_durations_ns))
+
+        for path in node_props:
+            while len(node_props[path]) < n_valid:
+                node_props[path].append((0.0, 0.0))
+
+        abs_pos: dict[tuple, tuple[int, int]] = {}
+        rows_out: list[dict] = []
+        max_dep = max(path_to_depth.values(), default=0)
+
+        for depth in range(max_dep + 1):
+            for path, dep in path_to_depth.items():
+                if dep != depth:
+                    continue
+                parent = parent_of[path]
+                props  = node_props.get(path, [])
+
+                if depth == 0:
+                    abs_start  = 0
+                    abs_finish = mean_root_dur_ns
+                    frequency  = 1.0
+                else:
+                    if parent not in abs_pos:
+                        continue
+                    par_start, par_finish = abs_pos[parent]
+                    par_dur = par_finish - par_start
+                    if par_dur <= 0:
+                        continue
+
+                    mean_offset = float(np.mean([o for o, _dur in props]))
+                    mean_dur    = float(np.mean([_dur for _o, _dur in props]))
+                    frequency   = sum(1 for _o, _dur in props if _dur > 0) / n_valid
+
+                    if mean_dur <= 0:
+                        continue
+
+                    abs_start  = par_start + int(mean_offset * par_dur)
+                    abs_finish = abs_start + int(mean_dur    * par_dur)
+
+                abs_pos[path] = (abs_start, abs_finish)
+                rows_out.append({
+                    "function":  path_to_func[path],
+                    "thread":    thread,
+                    "depth":     depth,
+                    "start":     abs_start,
+                    "finish":    abs_finish,
+                    "duration":  abs_finish - abs_start,
+                    "frequency": frequency,
+                })
+
+        if not rows_out:
+            return pd.DataFrame()
+
+        result = pd.DataFrame(rows_out)
+        result["start"]     = result["start"].astype("int64")
+        result["finish"]    = result["finish"].astype("int64")
+        result["duration"]  = result["duration"].astype("int64")
+        result["depth"]     = result["depth"].astype("int")
+        result["frequency"] = result["frequency"].astype("float64")
+
+        self._mean_subtree_cache[cache_key] = result
+        return result
+
     def get_quanta_df(
         self,
         active_threads: list[str],
@@ -293,9 +525,6 @@ class BlupTrace:
                 df_rel, active_threads, t_max, n_quanta
             )
         return self._quanta_cache[key]
-
-    def clear_quanta_cache(self):
-        self._quanta_cache.clear()
 
     def get_function_stats(self, func: str) -> dict | None:
         if func in self._func_stats_cache:
@@ -322,8 +551,15 @@ class BlupTrace:
     def clear_stats_cache(self):
         self._func_stats_cache.clear()
 
+    def clear_mean_subtree_cache(self):
+        self._mean_subtree_cache.clear()
+
+    def clear_quanta_cache(self):
+        self._quanta_cache.clear()
+
     def clear_all_caches(self):
         self.clear_stats_cache()
+        self.clear_mean_subtree_cache()
         self.clear_quanta_cache()
 
 class TraceComparison:

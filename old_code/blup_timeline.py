@@ -18,7 +18,8 @@ def _empty_display_dict():
         function=[],
         duration=[],
         thread=[],
-        depth=[]
+        depth=[],
+        frequency=[]
     )
 
 def _empty_quanta_dict():
@@ -64,6 +65,9 @@ class Timeline:
         self._duration_filter: tuple[str, float, float] | None = None
         self._n_quanta: int = 200
         self._quanta_stack_order: str = "global"
+        self._subtree_mode: str = "nth"
+        self._subtree_occurrence: int = 0
+        self._current_subtree_raw: list[tuple[str, str, pd.DataFrame]] = []
 
         # process trace data
         df1, df2, self.all_threads, self.all_functions = self._prepare()
@@ -133,6 +137,19 @@ class Timeline:
         if self.mode == self.QUANTA:
             self._refresh_quanta_sources()
 
+    def set_subtree_mode(self, mode: str):
+        assert mode in ("nth", "median", "mean")
+        if mode == self._subtree_mode:
+            return
+        self._subtree_mode = mode
+        if self.mode == self.SUBTREE:
+            self._refresh_subtree_sources()
+
+    def set_subtree_occurrence(self, n: int):
+        self._subtree_occurrence = n
+        if self.mode == self.SUBTREE:
+            self._refresh_subtree_sources()
+
     def set_mode(self, mode: str):
         assert mode in (self.GANTT, self.FLAME, self.SUBTREE, self.QUANTA)
         if mode == self.mode:
@@ -192,6 +209,18 @@ class Timeline:
         if self.fig is not None:
             self.fig.legend.visible = not self.fig.legend.visible  # type: ignore
 
+    def get_instance_counts(self, func: str) -> dict[str, dict[str, int]]:
+        result: dict[str, dict[str, int]] = {}
+        for trace_obj, label in [(self.t1, "Trace 1"), (self.t2, "Trace 2")]:
+            result[label] = {
+                thread: trace_obj.get_instance_count(func, thread)
+                for thread in self.active_threads
+            }
+        return result
+
+    def get_current_subtree_raw(self) -> list[tuple[str, str, pd.DataFrame]]:
+        return list(self._current_subtree_raw)
+
     def _prepare(self):
         return prepare_display_df(
             self.t1, self.t2,
@@ -236,8 +265,11 @@ class Timeline:
             x_axis_type="datetime",
         )
         g.add_tools(HoverTool(tooltips=[
-            ("function", "@function"), ("start", "@start"),
-            ("finish",   "@finish"),   ("duration", "@duration"),
+            ("function", "@function"),
+            ("start", "@start"),
+            ("finish",   "@finish"),
+            ("duration", "@duration"),
+            ("frequency", "@frequency"),
         ]))
         g.on_event(events.RangesUpdate, self._on_ranges_update)
         return g
@@ -350,7 +382,13 @@ class Timeline:
 
         apply_top_bottom(df, label, self._stack_mode, depth_step, max_depth)
 
-        df["alpha"] = 1.0
+        # NOTE: note sure about how this looks yet
+        if "frequency" in df.columns:
+            df["alpha"] = df["frequency"]
+        else:
+            df["alpha"]     = 1.0
+            df["frequency"] = 1.0
+
         return df
 
     def _prepare_subtree_df(self) -> tuple[pd.DataFrame, pd.DataFrame, float]:
@@ -358,30 +396,50 @@ class Timeline:
         if func is None:
             return pd.DataFrame(), pd.DataFrame(), 0.0
 
-        color_map  = {f: self._used_palette[i % len(self._used_palette)]
-                    for i, f in enumerate(self.all_functions)}
-        depth_step = 0.1
-        gap        = depth_step / 10.0
-        results    = []
-        all_parts  = []
-
+        color_map          = {f: self._used_palette[i % len(self._used_palette)]
+                               for i, f in enumerate(self.all_functions)}
+        depth_step         = 0.1
+        gap                = depth_step / 10.0
+        results            = []
+        all_parts          = []
         per_trace_parts    = []
         max_finish_ns: int = 0
+
+        self._current_subtree_raw = []
+
         for trace_obj, label in [(self.t1, "Trace 1"), (self.t2, "Trace 2")]:
             parts = []
             for thread in self.active_threads:
-                instances = trace_obj.get_call_instances(func, thread)
-                if not instances:
-                    continue
-                sub = trace_obj.get_call_subtree(instances[0])
+                if self._subtree_mode == "mean":
+                    sub = trace_obj.build_mean_subtree(func, thread)
+                    if sub.empty:
+                        continue
+                    sub["trace"] = label
+                    finish_max = int(sub["finish"].max())
+                    self._current_subtree_raw.append((label, thread, sub.copy()))
+                else:  # "nth" or "median"
+                    instances = trace_obj.get_call_instances(func, thread)
+                    if not instances:
+                        continue
 
-                root_start    = sub["start"].min()
-                sub["start"]  = sub["start"]  - root_start
-                sub["finish"] = sub["finish"] - root_start
+                    if self._subtree_mode == "nth":
+                        if self._subtree_occurrence >= len(instances):
+                            continue
+                        idx = instances[self._subtree_occurrence]
+                    else:  # "median"
+                        idx = trace_obj.get_median_instance(func, thread)
+                        if idx is None:
+                            continue
 
-                max_finish_ns = max(max_finish_ns, sub["finish"].max().value)
+                    sub = trace_obj.get_call_subtree(idx)
+                    root_start    = sub["start"].min()
+                    sub["start"]  = sub["start"]  - root_start
+                    sub["finish"] = sub["finish"] - root_start
+                    sub["trace"]  = label
+                    finish_max = sub["finish"].max().value
+                    self._current_subtree_raw.append((label, thread, sub.copy()))
 
-                sub["trace"]  = label
+                max_finish_ns = max(max_finish_ns, finish_max)
                 parts.append(sub)
                 all_parts.append(sub)
             per_trace_parts.append((parts, label))
