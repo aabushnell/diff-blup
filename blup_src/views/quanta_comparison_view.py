@@ -120,7 +120,7 @@ class QuantaComparisonView:
             all_token_keys |= self.bundle_token_keys(q2)
             color_map = build_color_map(all_token_keys)
 
-        with timed("quanta_bundle_to_bokeh_source"):
+        with timed("quanta_bundle_to_bokeh_source src1"):
             src1 = quanta_bundle_to_bokeh_source(
                 q1,
                 meta            = self.t1.meta,
@@ -129,6 +129,7 @@ class QuantaComparisonView:
                 color_map       = color_map,
                 stack_order     = stack_order,
             )
+        with timed("quanta_bundle_to_bokeh_source src2"):
             src2 = quanta_bundle_to_bokeh_source(
                 q2,
                 meta            = self.t2.meta,
@@ -138,16 +139,19 @@ class QuantaComparisonView:
                 stack_order     = stack_order,
             )
 
-        with timed("setup data"):
+        with timed("setup data src1"):
             self.source1.data = src1
+        with timed("setup data src2"):
             self.source2.data = src2
-
+        with timed("setup data yrange"):
             if self.fig is not None:
                 self.fig.y_range.factors = list(reversed(common_names))  # type: ignore
-                if len(edges) >= 2:
-                    self.fig.x_range.start = int(edges[0]) / 1e6  # type: ignore
-                    self.fig.x_range.end = int(edges[-1]) / 1e6  # type: ignore
+        with timed("setup data xrange"):
+            if self.fig is not None and len(edges) >= 2:
+                self.fig.x_range.start = int(edges[0]) / 1e6  # type: ignore
+                self.fig.x_range.end = int(edges[-1]) / 1e6  # type: ignore
 
+        with timed("return"):
             return {
                 "threads": common_names,
                 "n_bins": int(n_quanta),

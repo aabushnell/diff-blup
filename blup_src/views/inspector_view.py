@@ -4,6 +4,7 @@ from bokeh.layouts import column
 from bokeh.models.widgets.markups import Div
 
 from trace_session import TraceSession
+from utils import timed
 
 
 class InspectorView:

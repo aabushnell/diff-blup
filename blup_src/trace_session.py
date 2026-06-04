@@ -268,14 +268,13 @@ class TraceSession:
             return bundle
 
         with timed("trace.calc_quanta_base"):
-            raw = self._trace.calc_quanta_base(tids, bins, query.fidelity)
+            raw = self._trace.calc_quanta_base(
+                tids, bins, query.fidelity,
+                -1 if query.top_k is None else int(query.top_k)
+            )
 
         with timed("normalize_quanta_result"):
             bundle = normalize_quanta_result(raw, query.fidelity)
-
-        with timed("limit_quanta_top_k"):
-            if query.top_k is not None:
-                bundle = self.limit_quanta_top_k(bundle, query.top_k)
 
         self._quanta_cache.put(cache_key, bundle)
         return bundle
@@ -518,32 +517,3 @@ class TraceSession:
 
     # ------- helpers -------
 
-    def limit_quanta_top_k(self, bundle: QuantaBundle, top_k: int) -> QuantaBundle:
-        if top_k <= 0:
-            return empty_quanta_bundle(bundle.fidelity)
-
-        totals: dict[tuple[int, int], int] = defaultdict(int)
-        for ttype, tid, excl in zip(bundle.token_type, bundle.token_id, bundle.excl_ns):
-            totals[(int(ttype), int(tid))] += int(excl)
-
-        groups: dict[tuple[int, int, int], list[int]] = defaultdict(list)
-        for i, (b0, b1, tid) in enumerate(zip(bundle.start_ns, bundle.end_ns, bundle.thread_id)):
-            groups[(int(b0), int(b1), int(tid))].append(i)
-
-        keep: list[int] = []
-        for _, idxs in groups.items():
-            idxs.sort(
-                key=lambda i: (
-                    -totals[(int(bundle.token_type[i]), int(bundle.token_id[i]))],
-                    -int(bundle.excl_ns[i]),
-                    int(bundle.token_type[i]),
-                    int(bundle.token_id[i]),
-                )
-            )
-            keep.extend(idxs[:top_k])
-
-        if not keep:
-            return empty_quanta_bundle(bundle.fidelity)
-
-        keep_arr = np.array(sorted(keep), dtype=np.int64)
-        return subset_quanta_bundle(bundle, keep_arr)
