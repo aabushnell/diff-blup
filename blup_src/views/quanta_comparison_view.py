@@ -7,6 +7,7 @@ from bokeh.models.tools import HoverTool
 from bokeh.models.ranges import Range1d
 from bokeh.plotting import figure
 
+from data_model import QuantaQuery, as_token_key
 from trace_session import TraceSession, QuantaQuery
 from adapters.quanta_adapter import (
     empty_quanta_source,
@@ -35,21 +36,22 @@ class QuantaComparisonView:
         self.source2 = ColumnDataSource(empty_quanta_source())
 
     def build(self):
-        all_threads = self._all_thread_names()
+        all_threads = self.get_all_thread_names()
         fig = figure(
-            width=self.width,
-            height=self.height,
-            x_range=Range1d(0, 1),
-            y_range=list(reversed(all_threads)),  # type: ignore
-            tools=["box_zoom", "xwheel_pan", "xbox_zoom", "reset", "undo", "redo", "save"],
-            active_drag="box_zoom",
-            output_backend="webgl",
-            title="Quanta comparison",
-            x_axis_label="Time (ms)",
+            width           = self.width,
+            height          = self.height,
+            x_range         = Range1d(0, 1),
+            y_range         = list(reversed(all_threads)),  # type: ignore
+            tools           = ["box_zoom", "xwheel_pan", "xbox_zoom", "reset", "undo", "redo", "save"],
+            active_drag     = "box_zoom",
+            output_backend  = "webgl",
+            title           = "Quanta comparison",
+            x_axis_label    = "Time (ms)",
         )
         fig.add_tools(HoverTool(tooltips=[
             ("thread", "@thread"),
-            ("function", "@function"),
+            ("token", "@token_name"),
+            ("token_key", "@token_key"),
             ("proportion", "@proportion{0.000}"),
             ("exclusive_s", "@exclusive_s{0.000000} s"),
         ]))
@@ -75,8 +77,8 @@ class QuantaComparisonView:
         stack_order: str,
     ) -> dict:
         with timed("setup metadata"):
-            common_names = self._shared_thread_names(active_thread_names)
-            all_funcs = set(self.t1.summary.top_functions) | set(self.t2.summary.top_functions)
+            common_names = self.get_shared_thread_names(active_thread_names)
+            top_tokens = set(self.t1.summary.top_tokens) | set(self.t2.summary.top_tokens)
 
             thread_ids_1 = tuple(
                 self.t1.meta.thread_name_to_id[name]
@@ -94,41 +96,46 @@ class QuantaComparisonView:
             edges = np.linspace(start_ns, end_ns, int(n_quanta) + 1, dtype=np.int64)
 
         with timed("compute_quanta q1"):
-            q1 = self.t1.compute_quanta(QuantaQuery(
-                thread_ids=thread_ids_1,
-                bin_edges_ns=tuple(int(x) for x in edges),
-                mode=mode,  # type: ignore
-                top_k=16,
-                include_other=False,
-            ))
+            q1 = self.t1.query_quanta(
+                QuantaQuery(
+                    thread_ids      = thread_ids_1,
+                    bin_edges_ns    = tuple(int(x) for x in edges),
+                    fidelity        = mode,  # type: ignore
+                    top_k           = 16,
+                )
+            )
         with timed("compute_quanta q2"):
-            q2 = self.t2.compute_quanta(QuantaQuery(
-                thread_ids=thread_ids_2,
-                bin_edges_ns=tuple(int(x) for x in edges),
-                mode=mode,  # type: ignore
-                top_k=16,
-                include_other=False,
-            ))
+            q2 = self.t2.query_quanta(
+                QuantaQuery(
+                    thread_ids      = thread_ids_2,
+                    bin_edges_ns    = tuple(int(x) for x in edges),
+                    fidelity        = mode,  # type: ignore
+                    top_k           = 16,
+                )
+            )
 
         with timed("setup color_map"):
-            all_funcs |= set(str(f) for f in q1.function)
-            all_funcs |= set(str(f) for f in q2.function)
-            color_map = build_color_map(all_funcs)
+            all_token_keys = set(top_tokens)
+            all_token_keys |= self.bundle_token_keys(q1)
+            all_token_keys |= self.bundle_token_keys(q2)
+            color_map = build_color_map(all_token_keys)
 
         with timed("quanta_bundle_to_bokeh_source"):
             src1 = quanta_bundle_to_bokeh_source(
                 q1,
-                active_threads=common_names,
-                trace_side="lower",
-                color_map=color_map,
-                stack_order=stack_order,
+                meta            = self.t1.meta,
+                active_threads  = common_names,
+                trace_side      = "lower",
+                color_map       = color_map,
+                stack_order     = stack_order,
             )
             src2 = quanta_bundle_to_bokeh_source(
                 q2,
-                active_threads=common_names,
-                trace_side="upper",
-                color_map=color_map,
-                stack_order=stack_order,
+                meta            = self.t2.meta,
+                active_threads  = common_names,
+                trace_side      = "upper",
+                color_map       = color_map,
+                stack_order     = stack_order,
             )
 
         with timed("setup data"):
@@ -141,15 +148,6 @@ class QuantaComparisonView:
                     self.fig.x_range.start = int(edges[0]) / 1e6  # type: ignore
                     self.fig.x_range.end = int(edges[-1]) / 1e6  # type: ignore
 
-            print("len(q1) =", len(q1.function))
-            print("len(q2) =", len(q2.function))
-            print("len(src1[left]) =", len(src1["left"]))
-            print("len(src2[left]) =", len(src2["left"]))
-            print("n_threads =", len(common_names))
-            print("n_bins =", len(edges) - 1)
-            print("distinct funcs q1 =", len(set(map(str, q1.function))))
-            print("distinct funcs q2 =", len(set(map(str, q2.function))))
-
             return {
                 "threads": common_names,
                 "n_bins": int(n_quanta),
@@ -158,11 +156,17 @@ class QuantaComparisonView:
                 "color_map": color_map,
             }
 
-    def _all_thread_names(self) -> list[str]:
-        names = {t.thread_name for t in self.t1.meta.threads} | {t.thread_name for t in self.t2.meta.threads}
+    def bundle_token_keys(self, bundle) -> set[str]:
+        return {
+            as_token_key(int(tt), int(tid))
+            for tt, tid in zip(bundle.token_type, bundle.token_id)
+        }
+
+    def get_all_thread_names(self) -> list[str]:
+        names = set(map(str, self.t1.meta.thread_names)) | set(map(str, self.t2.meta.thread_names))
         return sorted(names)
 
-    def _shared_thread_names(self, requested: list[str]) -> list[str]:
-        available = set(self._all_thread_names())
+    def get_shared_thread_names(self, requested: list[str]) -> list[str]:
+        available = set(self.get_all_thread_names())
         chosen = [name for name in requested if name in available]
-        return chosen or self._all_thread_names()
+        return chosen or self.get_all_thread_names()

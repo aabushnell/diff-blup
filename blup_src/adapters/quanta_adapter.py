@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Iterable
 
-from trace_session import QuantaBundle
+from data_model import QuantaBundle, TraceInfo, as_token_key
 
 
 PALETTE = [
@@ -19,61 +19,95 @@ def empty_quanta_source() -> dict:
         top=[],
         bottom=[],
         color=[],
-        function=[],
+        token_key=[],
+        token_name=[],
         thread=[],
         proportion=[],
         exclusive_s=[],
     )
 
-def build_color_map(functions: Iterable[str]) -> dict[str, str]:
-    funcs = sorted(set(str(f) for f in functions))
-    return {f: PALETTE[i % len(PALETTE)] for i, f in enumerate(funcs)}
+def build_color_map(token_keys: Iterable[str]) -> dict[str, str]:
+    keys = sorted(set(str(k) for k in token_keys))
+    return {k: PALETTE[i % len(PALETTE)] for i, k in enumerate(keys)}
 
 def quanta_bundle_to_bokeh_source(
     bundle: QuantaBundle,
     *,
+    meta: TraceInfo,
     active_threads: list[str],
     trace_side: str,
     color_map: dict[str, str],
     stack_order: str = "global",
 ) -> dict:
-    if len(bundle.function) == 0:
+    if len(bundle.start_ns) == 0:
         return empty_quanta_source()
 
+    if trace_side not in {"lower", "upper"}:
+        raise ValueError(f"invalid trace_side: {trace_side!r}")
+
+    thread_centers = {
+        name: len(active_threads) - 0.5 - i
+        for i, name in enumerate(active_threads)
+    }
+
     rows = []
-    for i in range(len(bundle.function)):
+    for i in range(len(bundle.start_ns)):
+        tid = int(bundle.thread_id[i])
+        thread_name = meta.thread_id_to_name.get(tid)
+        if thread_name is None or thread_name not in thread_centers:
+            continue
+
+        token_type = int(bundle.token_type[i])
+        token_id = int(bundle.token_id[i])
+        token_key = as_token_key(token_type, token_id)
+        token_name = meta.token_key_to_name.get(token_key, token_key)
+
         rows.append({
-            "left": int(bundle.bin_start_ns[i]) / 1e6,
-            "right": int(bundle.bin_end_ns[i]) / 1e6,
-            "thread": str(bundle.thread_name[i]),
-            "function": str(bundle.function[i]),
+            "left": int(bundle.start_ns[i]) / 1e6,
+            "right": int(bundle.end_ns[i]) / 1e6,
+            "thread": thread_name,
+            "token_key": token_key,
+            "token_name": token_name,
             "proportion": float(bundle.proportion[i]),
-            "exclusive_s": int(bundle.exclusive_ns[i]) / 1e9,
+            "exclusive_s": int(bundle.excl_ns[i]) / 1e9,
         })
+
+    if not rows:
+        return empty_quanta_source()
 
     if stack_order == "global":
         totals = defaultdict(float)
         for r in rows:
-            totals[r["function"]] += r["exclusive_s"]
-        rank = {f: i for i, (f, _) in enumerate(sorted(totals.items(), key=lambda kv: -kv[1]))}
-        sort_key_fn = lambda row: rank.get(row["function"], 10**9)
+            totals[r["token_key"]] += r["exclusive_s"]
+        rank = {
+            token_key: i
+            for i, (token_key, _) in enumerate(
+                sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
+            )
+        }
+        sort_key_fn = lambda row: rank.get(row["token_key"], 10**9)
+    elif stack_order == "local":
+        sort_key_fn = lambda row: (-row["proportion"], row["token_key"])
     else:
-        sort_key_fn = lambda row: -row["proportion"]
+        raise ValueError(f"invalid stack_order: {stack_order!r}")
 
     half = 0.45
     padding = 0.02
     grouped = defaultdict(list)
+
     for r in rows:
         key = (r["thread"], r["left"], r["right"])
         grouped[key].append(r)
 
     out = empty_quanta_source()
     for (thread, left, right), grp in grouped.items():
-        center = len(active_threads) - 0.5 - active_threads.index(thread)
+        center = thread_centers[thread]
         grp = sorted(grp, key=sort_key_fn)
+
         cumsum = 0.0
         for row in grp:
             p = row["proportion"]
+
             if trace_side == "lower":
                 top = center - padding - cumsum * half
                 bottom = center - padding - (cumsum + p) * half
@@ -85,11 +119,13 @@ def quanta_bundle_to_bokeh_source(
             out["right"].append(right)
             out["top"].append(top)
             out["bottom"].append(bottom)
-            out["color"].append(color_map.get(row["function"], "#999999"))
-            out["function"].append(row["function"])
+            out["color"].append(color_map.get(row["token_key"], "#999999"))
+            out["token_key"].append(row["token_key"])
+            out["token_name"].append(row["token_name"])
             out["thread"].append(thread)
             out["proportion"].append(p)
             out["exclusive_s"].append(row["exclusive_s"])
+
             cumsum += p
 
     return out
