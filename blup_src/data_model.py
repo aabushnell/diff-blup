@@ -4,10 +4,12 @@ from typing import Optional, Literal
 
 import numpy as np
 
-
-DataFidelity = Literal["fast", "exact"]
+DataFidelity = Literal["fast", "balanced", "exact"]
 
 OccurrenceMode = Literal["all", "first", "last", "nth", "median"]
+
+TokenMode = Literal["raw", "category"]
+CATEGORY_TOKEN_TYPE = 3
 
 # Data Storage Cache structure
 
@@ -47,7 +49,11 @@ class TraceInfo:
 
     thread_name_to_id:  dict[str, int]
     thread_id_to_name:  dict[int, str]
+
     token_key_to_name:  dict[str, str]
+
+    token_cat_remap:    dict[tuple[int, int], tuple[int, int]]
+    cat_key_to_name:    dict[str, str]
 
 # Tier 2: Abbreviated Data Summaries
 
@@ -68,8 +74,11 @@ class TraceSummary:
 
 @dataclass(frozen=True)
 class SummaryQuery:
+    thread_ids:         tuple[int, ...]
     fidelity:           DataFidelity = "fast"
+    token_mode:         TokenMode = "raw"
     top_k:              int = 32
+    block_only:         bool = False
 
 # Tier 3: Large Data Streams and Queries
 
@@ -91,6 +100,7 @@ class QuantaQuery:
     thread_ids:         tuple[int, ...]
     bin_edges_ns:       tuple[int, ...]
     fidelity:           DataFidelity = "fast"
+    token_mode:         TokenMode = "raw"
     top_k:              Optional[int] = None
 
 def empty_quanta_bundle(fidelity: DataFidelity) -> QuantaBundle:
@@ -150,6 +160,7 @@ def canonicalize_quanta_query(query: QuantaQuery) -> QuantaQuery:
         thread_ids      = tuple(sorted(int(t) for t in query.thread_ids)),
         bin_edges_ns    = tuple(int(x) for x in query.bin_edges_ns),
         fidelity        = query.fidelity,
+        token_mode      = query.token_mode,
         top_k           = None if query.top_k is None else int(query.top_k),
     )
 
@@ -174,6 +185,7 @@ class SpanQuery:
     t0_ns:              int
     t1_ns:              int
     fidelity:           DataFidelity = "fast"
+    token_mode:         TokenMode = "raw"
     max_depth:          Optional[int] = None
     token:              Optional[tuple[int, int]] = None
 
@@ -239,15 +251,16 @@ def subset_span_bundle(bundle: SpanBundle, keep: np.ndarray, fidelity: DataFidel
     )
 
 def canonicalize_span_query(query: SpanQuery) -> SpanQuery:
-        tok = None if query.token is None else (int(query.token[0]), int(query.token[1]))
-        return SpanQuery(
-            thread_ids  = tuple(sorted(int(t) for t in query.thread_ids)),
-            t0_ns       = int(query.t0_ns),
-            t1_ns       = int(query.t1_ns),
-            fidelity    = query.fidelity,
-            max_depth   = None if query.max_depth is None else int(query.max_depth),
-            token       = tok,
-        )
+    tok = None if query.token is None else (int(query.token[0]), int(query.token[1]))
+    return SpanQuery(
+        thread_ids  = tuple(sorted(int(t) for t in query.thread_ids)),
+        t0_ns       = int(query.t0_ns),
+        t1_ns       = int(query.t1_ns),
+        fidelity    = query.fidelity,
+        token_mode  = query.token_mode,
+        max_depth   = None if query.max_depth is None else int(query.max_depth),
+        token       = tok,
+    )
 
 # Occurence Data Path
 
@@ -256,6 +269,7 @@ class OccurrenceQuery:
     thread_ids:         tuple[int, ...]
     token:              tuple[int, int]
     fidelity:           DataFidelity = "exact"
+    token_mode:         TokenMode = "raw"
     t0_ns:              Optional[int] = None
     t1_ns:              Optional[int] = None
     max_depth:          Optional[int] = None
@@ -267,6 +281,7 @@ def canonicalize_occurrence_query(query: OccurrenceQuery) -> OccurrenceQuery:
         thread_ids  = tuple(sorted(int(t) for t in query.thread_ids)),
         token       = (int(query.token[0]), int(query.token[1])),
         fidelity    = query.fidelity,
+        token_mode  = query.token_mode,
         t0_ns       = None if query.t0_ns is None else int(query.t0_ns),
         t1_ns       = None if query.t1_ns is None else int(query.t1_ns),
         max_depth   = None if query.max_depth is None else int(query.max_depth),
@@ -308,6 +323,31 @@ def canonicalize_subtree_query(query: SubtreeQuery) -> SubtreeQuery:
         fidelity        = query.fidelity,
         max_depth       = None if query.max_depth is None else int(query.max_depth),
         normalize_time  = bool(query.normalize_time),
+    )
+
+@dataclass(frozen=True)
+class SnapshotHistogram:
+    left_ns: tuple[int, ...]
+    right_ns: tuple[int, ...]
+    excl_ns: tuple[int, ...]
+
+@dataclass(frozen=True)
+class SnapshotHistogramQuery:
+    thread_ids: tuple[int, ...]
+    token: tuple[int, int]
+    t0_ns: int
+    t1_ns: int
+    n_bins: int = 20
+    token_mode: TokenMode = "raw"
+
+def canonicalize_histogram_query(query: SnapshotHistogramQuery) -> SnapshotHistogramQuery:
+    return SnapshotHistogramQuery(
+        thread_ids=tuple(sorted(int(t) for t in query.thread_ids)),
+        token=(int(query.token[0]), int(query.token[1])),
+        t0_ns=int(query.t0_ns),
+        t1_ns=int(query.t1_ns),
+        n_bins=int(query.n_bins),
+        token_mode=query.token_mode,
     )
 
 # Misc Data Model helper functions

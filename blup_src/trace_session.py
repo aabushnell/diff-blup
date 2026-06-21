@@ -4,6 +4,7 @@ from collections import Counter, defaultdict
 from typing import Optional
 
 import numpy as np
+import numpy.typing as npt
 import pallas_trace as pallas
 
 from data_model import *
@@ -26,6 +27,7 @@ class TraceSession:
         max_span_cache: int = 32,
         max_occ_cache: int = 64,
         max_subtree_cache: int = 32,
+        max_hist_cache: int = 32,
     ) -> None:
         self.path = path
 
@@ -38,6 +40,7 @@ class TraceSession:
         self._span_cache = DataCache(max_span_cache)
         self._occ_cache = DataCache(max_occ_cache)
         self._subtree_cache = DataCache(max_subtree_cache)
+        self._hist_cache = DataCache(max_hist_cache)
 
     # ---------- lifecycle ----------
 
@@ -55,8 +58,12 @@ class TraceSession:
         with timed("validate_trace"):
             self.validate_trace(self._meta)
 
-        summary_query = SummaryQuery(fidelity="fast", top_k=32)
-        with timed("summarize_functions"):
+        summary_query = SummaryQuery(
+            thread_ids=tuple(int(id) for id in self._meta.thread_ids),
+            fidelity="fast",
+            top_k=32,
+        )
+        with timed("summarize_tokens"):
             self._summary = self.summarize_tokens(summary_query)
 
     def close(self) -> None:
@@ -70,6 +77,7 @@ class TraceSession:
         self._quanta_cache.clear()
         self._span_cache.clear()
         self._subtree_cache.clear()
+        self._hist_cache.clear()
 
     # ---------- metadata ----------
 
@@ -108,27 +116,48 @@ class TraceSession:
         token_ids = np.asarray(token_res.token_id, dtype=np.int64)
         token_names = np.asarray([str(x) for x in token_res.display_name], dtype=object)
 
+        raw_token_key_to_name = {
+            as_token_key(int(ttype), int(tid)): str(name)
+            for ttype, tid, name in zip(token_types, token_ids, token_names)
+        }
+
+        name_to_members: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        for ttype, tid, name in zip(token_types, token_ids, token_names):
+            name_to_members[str(name)].append((int(ttype), int(tid)))
+
+        token_remap: dict[tuple[int, int], tuple[int, int]] = {}
+        category_key_to_name: dict[str, str] = {}
+
+        for cat_id, name in enumerate(sorted(name_to_members.keys())):
+            cat_tok = (CATEGORY_TOKEN_TYPE, int(cat_id))
+            cat_key = as_token_key(*cat_tok)
+            category_key_to_name[cat_key] = name
+            for src_tok in name_to_members[name]:
+                token_remap[src_tok] = cat_tok
+
+        token_key_to_name = dict(raw_token_key_to_name)
+        token_key_to_name.update(category_key_to_name)
+
         return TraceInfo(
-            path            = self.path,
-            start_ns        = min(r[2] for r in thread_rows),
-            end_ns          = max(r[3] for r in thread_rows),
-            thread_ids      = thread_ids,
-            thread_names    = thread_names,
-            token_types     = token_types,
-            token_ids       = token_ids,
-            token_names     = token_names,
-            thread_name_to_id = {
+            path                = self.path,
+            start_ns            = min(r[2] for r in thread_rows),
+            end_ns              = max(r[3] for r in thread_rows),
+            thread_ids          = thread_ids,
+            thread_names        = thread_names,
+            token_types         = token_types,
+            token_ids           = token_ids,
+            token_names         = token_names,
+            thread_name_to_id   = {
                 str(name): int(tid)
                 for tid, name in zip(thread_ids, thread_names)
             },
-            thread_id_to_name = {
+            thread_id_to_name   = {
                 int(tid): str(name)
                 for tid, name in zip(thread_ids, thread_names)
             },
-            token_key_to_name = {
-                as_token_key(int(ttype), int(tid)): str(name)
-                for ttype, tid, name in zip(token_types, token_ids, token_names)
-            },
+            token_key_to_name   = token_key_to_name,
+            token_cat_remap     = token_remap,
+            cat_key_to_name     = category_key_to_name,
         )
 
     def validate_trace(self, meta: TraceInfo) -> None:
@@ -168,8 +197,8 @@ class TraceSession:
         if len(meta.thread_id_to_name) != len(thread_ids):
             raise RuntimeError("trace validation failed: thread_id_to_name is non-injective")
 
-        if len(meta.token_key_to_name) != len(token_keys):
-            raise RuntimeError("trace validation failed: token_key_to_name is non-injective")
+        if len(set(token_keys)) != len(token_keys):
+            raise RuntimeError("trace validation failed: duplicate raw token keys")
 
         for key, name in zip(token_keys, token_names):
             mapped = meta.token_key_to_name.get(key)
@@ -189,6 +218,8 @@ class TraceSession:
             self.open()
         assert self._trace is not None
 
+        wanted_tids = set(int(t) for t in query.thread_ids)
+
         incl_totals: dict[tuple[int, int], int] = defaultdict(int)
         excl_totals: dict[tuple[int, int], int] = defaultdict(int)
         call_counts: dict[tuple[int, int], int] = defaultdict(int)
@@ -197,11 +228,18 @@ class TraceSession:
         for archive in self._trace.archives:
             for thread in archive.threads:
                 tid = int(thread.id)
+                if wanted_tids and tid not in wanted_tids:
+                    continue
+
                 for seq in thread.sequences:
+                    if query.block_only and seq.type != pallas.SequenceType.SEQUENCE_BLOCK:
+                        continue
+
                     token = seq.id
                     token_type = int(token.type)
+
                     token_id = int(token.id)
-                    key = (token_type, token_id)
+                    key = self.remap_token_pair(token_type, token_id, token_mode=query.token_mode)
 
                     n_iter = int(seq.n_iterations)
                     if n_iter <= 0:
@@ -256,9 +294,6 @@ class TraceSession:
             self.open()
         assert self._trace is not None
 
-        if query.fidelity != "fast":
-            raise NotImplementedError("query_quanta: only fidelity='fast' is supported currently")
-
         tids = np.asarray(query.thread_ids, dtype=np.uint32)
         bins = np.asarray(query.bin_edges_ns, dtype=np.uint64)
 
@@ -267,14 +302,38 @@ class TraceSession:
             self._quanta_cache.put(cache_key, bundle)
             return bundle
 
-        with timed("trace.calc_quanta_base"):
+        with timed(f"trace.calc_quanta_base[{query.fidelity}]"):
             raw = self._trace.calc_quanta_base(
                 tids, bins, query.fidelity,
                 -1 if query.top_k is None else int(query.top_k)
             )
 
-        with timed("normalize_quanta_result"):
+        with timed(f"normalize_quanta_result[{query.fidelity}]"):
             bundle = normalize_quanta_result(raw, query.fidelity)
+
+        if query.token_mode == "category":
+            tt, tid, groups, sums = self.remap_tokens(
+                bundle.token_type,
+                bundle.token_id,
+                token_mode = query.token_mode,
+                group_keys=(bundle.start_ns, bundle.end_ns, bundle.thread_id),
+                sum_fields=(bundle.excl_ns, bundle.proportion),
+            )
+            assert groups is not None
+            assert sums is not None
+
+            start_ns, end_ns, thread_id = groups
+            excl_ns, proportion = sums
+            bundle = QuantaBundle(
+                fidelity = bundle.fidelity,
+                start_ns = start_ns,
+                end_ns = end_ns,
+                thread_id = thread_id,
+                token_type = tt,
+                token_id = tid,
+                excl_ns = excl_ns,
+                proportion = proportion,
+            )
 
         self._quanta_cache.put(cache_key, bundle)
         return bundle
@@ -323,8 +382,13 @@ class TraceSession:
                         reader.moveToNextToken(True, True)
                         continue
 
-                    token_type = int(token.type)
-                    token_id = token_int_id(token)
+                    raw_token_type = int(token.type)
+                    raw_token_id = token_int_id(token)
+                    token_type, token_id = self.remap_token_pair(
+                        raw_token_type,
+                        raw_token_id,
+                        token_mode = query.token_mode,
+                    )
 
                     if token_filter is not None and (token_type, token_id) != token_filter:
                         reader.moveToNextToken(True, True)
@@ -409,8 +473,13 @@ class TraceSession:
 
                     token_type = int(token.type)
                     token_id = token_int_id(token)
+                    mapped_type, mapped_id = self.remap_token_pair(
+                        token_type,
+                        token_id,
+                        token_mode=query.token_mode,
+                    )
 
-                    if (token_type, token_id) != want_token:
+                    if (mapped_type, mapped_id) != want_token:
                         reader.moveToNextToken(True, True)
                         continue
 
@@ -515,5 +584,149 @@ class TraceSession:
         self._subtree_cache.put(cache_key, bundle)
         return bundle
 
+    def query_histogram(self, query: SnapshotHistogramQuery) -> SnapshotHistogram:
+        query = canonicalize_histogram_query(query)
+
+        cache_key = ("snapshot_hist", query)
+        cached = self._hist_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if self._trace is None:
+            self.open()
+        assert self._trace is not None
+
+        if query.n_bins <= 0 or query.t1_ns <= query.t0_ns or not query.thread_ids:
+            out = SnapshotHistogram(left_ns=(), right_ns=(), excl_ns=())
+            self._hist_cache.put(cache_key, out)
+            return out
+
+        edges = np.linspace(query.t0_ns, query.t1_ns, query.n_bins + 1, dtype=np.int64)
+        totals = np.zeros(query.n_bins, dtype=np.int64)
+        wanted_tids = set(int(t) for t in query.thread_ids)
+
+        for archive in self._trace.archives:
+            for thread in archive.threads:
+                tid = int(thread.id)
+                if tid not in wanted_tids:
+                    continue
+
+                for i in range(query.n_bins):
+                    start_ns = int(edges[i])
+                    end_ns = int(edges[i + 1])
+                    snap = thread.getSnapshotView(start_ns, end_ns)
+
+                    bin_total = 0
+                    for key, value in snap.items():
+                        raw_type, raw_id = self._snapshot_key_to_token_pair(key)
+                        mapped = self.remap_token_pair(raw_type, raw_id, token_mode=query.token_mode)
+                        if mapped == query.token:
+                            bin_total += int(value)
+
+                    totals[i] += bin_total
+
+        out = SnapshotHistogram(
+            left_ns=tuple(int(x) for x in edges[:-1]),
+            right_ns=tuple(int(x) for x in edges[1:]),
+            excl_ns=tuple(int(x) for x in totals),
+        )
+        self._hist_cache.put(cache_key, out)
+        return out
+
     # ------- helpers -------
+
+    def remap_token_pair(
+        self,
+        token_type: int,
+        token_id: int,
+        *,
+        token_mode: TokenMode,
+    ) -> tuple[int, int]:
+        token_type = int(token_type)
+        token_id = int(token_id)
+
+        if token_mode != "category":
+            return (token_type, token_id)
+
+        mapped = self.meta.token_cat_remap.get((token_type, token_id))
+        if mapped is None:
+            return (token_type, token_id)
+
+        return (int(mapped[0]), int(mapped[1]))
+
+    def remap_tokens(
+        self,
+        token_type: np.ndarray,
+        token_id: np.ndarray,
+        *,
+        token_mode: TokenMode,
+        group_keys: Optional[tuple[np.ndarray, ...]] = None,
+        sum_fields: Optional[tuple[np.ndarray, ...]] = None,
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        Optional[tuple[np.ndarray, ...]],
+        Optional[tuple[np.ndarray, ...]],
+    ]:
+        out_type = np.asarray(token_type, dtype=np.uint8).copy()
+        out_id = np.asarray(token_id, dtype=np.int64).copy()
+
+        if token_mode == "category":
+            remap = self.meta.token_cat_remap
+            for i in range(len(out_id)):
+                mapped = remap.get((int(out_type[i]), int(out_id[i])))
+                if mapped is not None:
+                    out_type[i] = np.uint8(mapped[0])
+                    out_id[i] = np.int64(mapped[1])
+
+        if group_keys is None or sum_fields is None:
+            return out_type, out_id, None, None
+
+        acc: dict[tuple[int, ...], list[object]] = {}
+        order: list[tuple[int, ...]] = []
+
+        for i in range(len(out_id)):
+            key = tuple(int(g[i]) for g in group_keys) + (int(out_type[i]), int(out_id[i]))
+            if key not in acc:
+                acc[key] = [field[i] for field in sum_fields]
+                order.append(key)
+            else:
+                for j in range(len(sum_fields)):
+                    acc[key][j] += sum_fields[j][i]
+
+        if not order:
+            empty_groups = tuple(np.array([], dtype=g.dtype) for g in group_keys)
+            empty_sums = tuple(np.array([], dtype=f.dtype) for f in sum_fields)
+            return (
+                np.array([], dtype=np.uint8),
+                np.array([], dtype=np.int64),
+                empty_groups,
+                empty_sums,
+            )
+
+        n_group = len(group_keys)
+        cols = list(zip(*order))
+
+        out_group_keys = tuple(
+            np.asarray(cols[i], dtype=group_keys[i].dtype)
+            for i in range(n_group)
+        )
+        out_type2 = np.asarray(cols[n_group], dtype=np.uint8)
+        out_id2 = np.asarray(cols[n_group + 1], dtype=np.int64)
+        out_sum_fields = tuple(
+            np.asarray([acc[key][j] for key in order], dtype=sum_fields[j].dtype)
+            for j in range(len(sum_fields))
+        )
+
+        return out_type2, out_id2, out_group_keys, out_sum_fields
+
+    def _snapshot_key_to_token_pair(self, key) -> tuple[int, int]:
+        if isinstance(key, tuple):
+            if len(key) >= 1:
+                tok = key[0]
+                return (int(tok.type), int(tok.id))
+            raise ValueError(f"empty snapshot key tuple: {key!r}")
+        return (int(key.type), int(key.id))
+
+
 
