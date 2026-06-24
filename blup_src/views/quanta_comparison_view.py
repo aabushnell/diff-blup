@@ -188,18 +188,19 @@ class QuantaComparisonView:
                     const t_paint = performance.now();
                     const client_render_ms = t_paint - t_recv;
 
+                    const processing_ms = payload.py_compute_ms;
+                    const render_ms = payload.py_apply_ms + client_render_ms;
+
                     console.log("=========================================");
-                    console.log("[BENCHMARK] PALLAS Incremental Metrics");
-                    console.log(`  - Generation           : ${payload.generation}`);
-                    console.log(`  - Python Compute       : ${payload.py_compute_ms.toFixed(2)} ms`);
-                    console.log(`  - Python Apply         : ${payload.py_apply_ms.toFixed(2)} ms`);
-                    console.log(`  - Python Batch Total   : ${payload.py_total_ms.toFixed(2)} ms`);
-                    console.log(`  - Client Paint         : ${client_render_ms.toFixed(2)} ms`);
-                    console.log(`  - End-to-End After JS Ready : ${(payload.py_total_ms + client_render_ms).toFixed(2)} ms`);
+                    console.log("[BENCHMARK] PALLAS Two-Way Split");
+                    console.log(`  - Data Processing : ${processing_ms.toFixed(2)} ms`);
+                    console.log(`  - Render Time     : ${render_ms.toFixed(2)} ms`);
+                    console.log(`  - Total           : ${(processing_ms + render_ms).toFixed(2)} ms`);
                     console.log("=========================================");
                 });
             });
         """)
+
         self._benchmark_payload_input.js_on_change("value", js_benchmark)
 
         self.fig = fig
