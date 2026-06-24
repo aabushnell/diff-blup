@@ -9,7 +9,7 @@ from bokeh.layouts import column, row
 from bokeh.models.widgets.inputs import MultiSelect, Select, Spinner
 from bokeh.models.widgets.markups import Div
 
-from data_model import DataFidelity, TokenMode, SummaryQuery, as_token_key
+from data_model import CATEGORY_TOKEN_TYPE
 from state import AppState
 from trace_session import TraceSession
 from adapters.summary_adapter import SequenceSummaryDiffAdapter, SequenceSummaryDiffRow, format_duration_ns
@@ -33,6 +33,8 @@ class AppController:
     def __init__(self, t1: TraceSession, t2: TraceSession):
         self.t1 = t1
         self.t2 = t2
+
+        self.install_merged_category_namespace()
 
         self.state = self.initial_state()
 
@@ -427,3 +429,17 @@ class AppController:
 
         token = (int(token_types[i]), int(token_ids[i]))
         self.on_quanta_token_selected(token)
+
+    def install_merged_category_namespace(self) -> None:
+        names = sorted(
+            set(str(name) for name in self.t1.meta.cat_key_to_name.values())
+            | set(str(name) for name in self.t2.meta.cat_key_to_name.values())
+        )
+
+        name_to_cat_token = {
+            name: (CATEGORY_TOKEN_TYPE, int(i))
+            for i, name in enumerate(names)
+        }
+
+        self.t1.install_category_namespace(name_to_cat_token)
+        self.t2.install_category_namespace(name_to_cat_token)

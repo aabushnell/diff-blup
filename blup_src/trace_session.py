@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from typing import Optional
+from dataclasses import replace
 
 import numpy as np
 import numpy.typing as npt
@@ -76,6 +77,7 @@ class TraceSession:
         self._summary_cache.clear()
         self._quanta_cache.clear()
         self._span_cache.clear()
+        self._occ_cache.clear()
         self._subtree_cache.clear()
         self._hist_cache.clear()
 
@@ -159,6 +161,35 @@ class TraceSession:
             token_cat_remap     = token_remap,
             cat_key_to_name     = category_key_to_name,
         )
+
+    def install_category_namespace(
+        self,
+        name_to_cat_token: dict[str, tuple[int, int]],
+    ) -> None:
+        meta = self.meta
+
+        raw_key_to_name = {
+            as_token_key(int(tt), int(tid)): str(name)
+            for tt, tid, name in zip(meta.token_types, meta.token_ids, meta.token_names)
+        }
+
+        token_cat_remap = {
+            (int(tt), int(tid)): name_to_cat_token[str(name)]
+            for tt, tid, name in zip(meta.token_types, meta.token_ids, meta.token_names)
+        }
+
+        cat_key_to_name = {
+            as_token_key(tok_type, tok_id): name
+            for name, (tok_type, tok_id) in name_to_cat_token.items()
+        }
+
+        self._meta = replace(
+            meta,
+            token_key_to_name = raw_key_to_name | cat_key_to_name,
+            token_cat_remap   = token_cat_remap,
+            cat_key_to_name   = cat_key_to_name,
+        )
+        self.clear_caches()
 
     def validate_trace(self, meta: TraceInfo) -> None:
         thread_ids = [int(x) for x in meta.thread_ids]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import json
 from typing import Optional
 from collections import deque
 from dataclasses import dataclass
@@ -11,9 +12,10 @@ from bokeh.layouts import column
 from bokeh.models.tools import TapTool
 from bokeh.models.callbacks import CustomJS
 from bokeh.models.sources import ColumnDataSource
+from bokeh.events import DocumentReady
 from bokeh.models.tools import HoverTool
 from bokeh.models.ranges import Range1d
-from bokeh.models.widgets.markups import Div
+from bokeh.models.widgets.inputs import TextInput
 from bokeh.plotting import figure
 
 from data_model import DataFidelity, QuantaQuery, TokenMode, as_token_key
@@ -44,6 +46,7 @@ class ThreadLoadResult:
     src2:           dict
 
 class QuantaComparisonView:
+
     def __init__(
         self,
         t1: TraceSession,
@@ -84,6 +87,14 @@ class QuantaComparisonView:
 
         self.on_token_selected = None
         self._ignore_selection_callbacks = False
+
+        self._client_ready = False
+
+        self._bench_generation = 0
+        self._bench_py_compute_ms = 0.0
+        self._bench_py_apply_ms = 0.0
+        self._bench_py_total_ms = 0.0
+        self._bench_batch_start_ms = 0.0
 
     def build(self, doc=None):
         self.doc = doc or curdoc()
@@ -148,30 +159,55 @@ class QuantaComparisonView:
         )
         fig.add_tools(hover)
 
-        self._benchmark_trigger = Div(text="", visible=False)
-        
-        js_timer = CustomJS(code="""
-            // The text property will hold our t_py_end timestamp from Python
-            if (!cb_obj.text) return;
-            
-            const t_py_end = parseFloat(cb_obj.text);
-            const t_js_ready = Date.now();
-            const render_ms = t_js_ready - t_py_end;
-            
-            // window.benchmark_start is set in main()
-            const total_ms = t_js_ready - window.benchmark_start;
-            
-            console.log(`=========================================`);
-            console.log(`[BENCHMARK] PALLAS Incremental Metrics`);
-            console.log(`  - Final Chunk Render : ${render_ms.toFixed(2)} ms`);
-            console.log(`  - TOTAL End-to-End   : ${total_ms.toFixed(2)} ms`);
-            console.log(`=========================================`);
-        """)
+        self._client_ready_input = TextInput(value="0", visible=False)
+        self._benchmark_payload_input = TextInput(value="", visible=False)
 
-        self._benchmark_trigger.js_on_change('text', js_timer)
+        def _on_client_ready(attr, old, new):
+            if new != "1" or self._client_ready:
+                return
+            self._client_ready = True
+            if self._pending_jobs:
+                self.schedule_next_tick()
+
+        self._client_ready_input.on_change("value", _on_client_ready)
+
+        js_client_ready = CustomJS(args=dict(ready=self._client_ready_input), code="""
+            window.pallas_startup_begin = performance.now();
+            ready.value = "1";
+        """)
+        self._client_ready_input.js_on_event(DocumentReady, js_client_ready)
+
+        js_benchmark = CustomJS(code="""
+            if (!cb_obj.value) return;
+
+            const payload = JSON.parse(cb_obj.value);
+            const t_recv = performance.now();
+
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    const t_paint = performance.now();
+                    const client_render_ms = t_paint - t_recv;
+
+                    console.log("=========================================");
+                    console.log("[BENCHMARK] PALLAS Incremental Metrics");
+                    console.log(`  - Generation           : ${payload.generation}`);
+                    console.log(`  - Python Compute       : ${payload.py_compute_ms.toFixed(2)} ms`);
+                    console.log(`  - Python Apply         : ${payload.py_apply_ms.toFixed(2)} ms`);
+                    console.log(`  - Python Batch Total   : ${payload.py_total_ms.toFixed(2)} ms`);
+                    console.log(`  - Client Paint         : ${client_render_ms.toFixed(2)} ms`);
+                    console.log(`  - End-to-End After JS Ready : ${(payload.py_total_ms + client_render_ms).toFixed(2)} ms`);
+                    console.log("=========================================");
+                });
+            });
+        """)
+        self._benchmark_payload_input.js_on_change("value", js_benchmark)
 
         self.fig = fig
-        return fig
+        return column(
+            fig,
+            self._client_ready_input,
+            self._benchmark_payload_input,
+        )
 
     def update(
         self,
@@ -234,6 +270,12 @@ class QuantaComparisonView:
 
             self._generation += 1
             generation = self._generation
+            self._bench_generation = generation
+            self._bench_py_compute_ms = 0.0
+            self._bench_py_apply_ms = 0.0
+            self._bench_py_total_ms = 0.0
+            self._bench_batch_start_ms = time.perf_counter() * 1000.0
+
             self._request_key = request_key
 
             self._current_threads = common_names
@@ -275,7 +317,8 @@ class QuantaComparisonView:
 
         print("update gen", generation, "jobs", len(jobs))
 
-        self.schedule_next_tick()
+        if self._client_ready:
+            self.schedule_next_tick()
 
         return {
             "generation": generation,
@@ -304,15 +347,28 @@ class QuantaComparisonView:
             if job.generation != self._generation:
                 continue
 
+            t0 = time.perf_counter() * 1000.0
             result = self.compute_thread_chunk(job)
+            t1 = time.perf_counter() * 1000.0
+            self._bench_py_compute_ms += (t1 - t0)
+
+            t2 = time.perf_counter() * 1000.0
             self.apply_thread_chunk(result)
+            t3 = time.perf_counter() * 1000.0
+            self._bench_py_apply_ms += (t3 - t2)
             break
 
         if self._pending_jobs:
             self.schedule_next_tick()
         else:
-            app_end_time_ms = time.time() * 1000
-            self._benchmark_trigger.text = str(app_end_time_ms)
+            self._bench_py_total_ms = (time.perf_counter() * 1000.0) - self._bench_batch_start_ms
+            payload = {
+                "generation": self._generation,
+                "py_compute_ms": self._bench_py_compute_ms,
+                "py_apply_ms": self._bench_py_apply_ms,
+                "py_total_ms": self._bench_py_total_ms,
+            }
+            self._benchmark_payload_input.value = json.dumps(payload)
 
     def compute_thread_chunk(self, job: ThreadLoadJob) -> ThreadLoadResult:
         if job.thread_id_1 is not None:

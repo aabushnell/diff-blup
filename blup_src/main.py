@@ -261,15 +261,21 @@ def extract_bin_edges_from_quanta_res(res) -> tuple[int, ...]:
     return tuple(edges)
 
 def main():
-    app_start_time_ms = time.time() * 1000
 
     if len(sys.argv) < 3:
         raise SystemExit("Usage: bokeh serve --show main.py --args TRACE1 TRACE2")
 
-    js_init = CustomJS(args=dict(t_start=app_start_time_ms), code="""
-        window.benchmark_start = t_start;
+    js_startup_timer = CustomJS(code="""
+        const t_ready = performance.now();
+        const t0 = window.pallas_startup_begin ?? t_ready;
+        const startup_ms = t_ready - t0;
+
+        console.log("=========================================");
+        console.log("[BENCHMARK] PALLAS Startup Metrics");
+        console.log(`  - Browser startup to document_ready : ${startup_ms.toFixed(2)} ms`);
+        console.log("=========================================");
     """)
-    curdoc().js_on_event('document_ready', js_init)
+    curdoc().js_on_event(DocumentReady, js_startup_timer)
 
     print(">> Reading Traces")
 
@@ -329,25 +335,5 @@ def main():
         controller = AppController(t1, t2)
         curdoc().add_root(controller.build())
         curdoc().title = "Blup"
-
-    app_end_time_ms = time.time() * 1000
-
-    js_timer = CustomJS(args=dict(t_start=app_start_time_ms, t_py_end=app_end_time_ms), code="""
-        const t_js_ready = Date.now();
-        
-        const total_ms  = t_js_ready - t_start;
-        const python_ms = t_py_end - t_start;
-        const render_ms = t_js_ready - t_py_end;
-        
-        console.log(`=========================================`);
-        console.log(`[BENCHMARK] PALLAS Metrics`);
-        console.log(`  - Python Processing : ${python_ms.toFixed(2)} ms`);
-        console.log(`  - Browser Rendering : ${render_ms.toFixed(2)} ms`);
-        console.log(`  - TOTAL End-to-End  : ${total_ms.toFixed(2)} ms`);
-        console.log(`=========================================`);
-    """)
-
-    curdoc().js_on_event(DocumentReady, js_timer)
-
 
 main()
