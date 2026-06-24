@@ -175,7 +175,7 @@ class QuantaComparisonView:
             window.pallas_startup_begin = performance.now();
             ready.value = "1";
         """)
-        self._client_ready_input.js_on_event(DocumentReady, js_client_ready)
+        self.doc.js_on_event(DocumentReady, js_client_ready)
 
         js_benchmark = CustomJS(code="""
             if (!cb_obj.value) return;

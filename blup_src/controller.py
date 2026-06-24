@@ -131,7 +131,6 @@ class AppController:
                 time_fig,
                 # self.inspector.build(),
                 self.summary_view.build(),
-                self.time_view._benchmark_trigger,
                 sizing_mode="stretch_width",
             )
             self.root = column(
