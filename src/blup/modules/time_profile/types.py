@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Hashable, Literal
 
-from blup.data_model import FidelityMode, QuantaBundle, QuantaQuery, TokenMode
+from blup.data_model import FidelityMode, QuantaBundle, QuantaQuery, SpanBundle, SpanQuery, TokenMode
 from blup.state import TimeProfileOrder
 from blup.types import (
     ColorHex,
@@ -17,11 +17,18 @@ from blup.types import (
 )
 
 
+# NOTE: temp working local variables
+ResolvedPresentation = Literal["binned", "gantt", "flame"]
+FLAME_MAX_DEPTH = 6
+MAX_SPANS_PER_JOB = 20_000
+
+
 @dataclass(frozen=True)
 class TimeProfileTraceContext:
     thread_name_to_id:      dict[ThreadName, ThreadID]
     token_name_by_key:      dict[TokenKey, TokenName]
     query_quanta:           Callable[[QuantaQuery], QuantaBundle]
+    query_spans:            Callable[[SpanQuery], SpanBundle]
 
 
 @dataclass(frozen=True)
@@ -42,6 +49,7 @@ class TimeProfileUpdate:
     end_ns:                 TimestampNS
     sync_range_to_fig:      bool
     trace_mode:             TraceMode
+    presentation:           ResolvedPresentation
     context:                TimeProfileUpdateContext
 
     @property
@@ -55,6 +63,7 @@ class TimeProfileJob:
     thread_id:              ThreadID
     trace_side:             TraceSide
     thread_center:          float
+    thread_index:           int
     # ~~~
     update:                 TimeProfileUpdate
 
@@ -69,6 +78,7 @@ class TimeProfileRequest:
 class TimeProfileResult:
     thread_name:            str
     trace_side:             TraceSide
+    presentation:           ResolvedPresentation
     # ~~~
     src:                    dict
 

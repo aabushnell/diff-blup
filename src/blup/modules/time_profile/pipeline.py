@@ -11,6 +11,7 @@ from blup.modules.interface import UIWorkRequest
 from blup.modules.time_profile.assembler import TimeProfileAssembler
 from blup.modules.time_profile.chart import TimeProfileChartSurface
 from blup.modules.time_profile.types import (
+    ResolvedPresentation,
     TimeProfileTraceContext,
     TimeProfileUpdateContext,
     TimeProfileUpdate,
@@ -21,12 +22,17 @@ from blup.state import (
     ContextPatch,
     ModuleID,
     TimeScopePatch,
+    TimestampNS,
     TokenSelectionPatch,
 )
 
 if TYPE_CHECKING:
     from blup.controller import AppController
     from blup.traces.session import TraceSession
+
+
+# NOTE: temp working local variables
+_AUTO_GANTT_WINDOW_NS = 10_000_000_000  # 10 s
 
 
 class TimeProfilePipeline:
@@ -54,8 +60,8 @@ class TimeProfilePipeline:
     def __init__(self, *, height: int = 700) -> None:
         self.root = None
         self.host = None
-        self.assembler = TimeProfileAssembler()
 
+        self.assembler = TimeProfileAssembler()
         self.chart = TimeProfileChartSurface(height=height)
 
         self._pending_update = None
@@ -71,7 +77,6 @@ class TimeProfilePipeline:
 
     def bind(self, host: "AppController") -> None:
         self.host = host
-
         self.chart.on_token_selected = (
             lambda token: host.update_state(
                 context = ContextPatch(
@@ -153,6 +158,11 @@ class TimeProfilePipeline:
             end_ns = full_end_ns
             sync_range_to_fig = True
 
+        # resolve presentation mode
+        presentation = self._resolve_presentation(
+            host, start_ns=start_ns, end_ns=end_ns
+        )
+
         # prepare update context
         update_ctx = self._freeze_update_context(
             host                    = host,
@@ -162,6 +172,7 @@ class TimeProfilePipeline:
             start_ns                = int(start_ns),
             end_ns                  = int(end_ns),
             trace_mode              = trace_mode,
+            presentation            = presentation,
         )
 
         return TimeProfileUpdate(
@@ -170,8 +181,25 @@ class TimeProfilePipeline:
             end_ns                  = int(end_ns),
             sync_range_to_fig       = sync_range_to_fig,
             trace_mode              = trace_mode,
+            presentation            = presentation,
             context                 = update_ctx,
         )
+
+    def _resolve_presentation(
+        self,
+        host: "AppController",
+        *,
+        start_ns: TimestampNS,
+        end_ns: TimestampNS,
+    ) -> ResolvedPresentation:
+        presentation = host.state.modules.time_profile.presentation
+        if presentation == "auto":
+            if end_ns - start_ns <= _AUTO_GANTT_WINDOW_NS:
+                return "gantt"
+            return "binned"
+        if presentation in ("binned", "gantt", "flame"):
+            return presentation
+        raise ValueError(f"invalid presentation: {presentation!r}")
 
     def start_update(self) -> None:
         if self._pending_update is None:
@@ -186,11 +214,12 @@ class TimeProfilePipeline:
         self._ignore_range_callbacks = True
         try:
             self.chart.prepare_display(
-                active_thread_names     = list(update.active_thread_names),
-                start_ns                = update.start_ns,
-                end_ns                  = update.end_ns,
-                sync_range_to_fig       = update.sync_range_to_fig,
-                trace_mode              = update.trace_mode,
+                active_thread_names=list(update.active_thread_names),
+                start_ns=update.start_ns,
+                end_ns=update.end_ns,
+                sync_range_to_fig=update.sync_range_to_fig,
+                trace_mode=update.trace_mode,
+                presentation=update.presentation,
             )
         finally:
             self._ignore_range_callbacks = False
@@ -216,9 +245,10 @@ class TimeProfilePipeline:
         upper_session: TraceSession,
         lower_session: TraceSession | None,
         active_thread_names: tuple[str, ...],
-        start_ns: int,
-        end_ns: int,
+        start_ns: TimestampNS,
+        end_ns: TimestampNS,
         trace_mode: str,
+        presentation: ResolvedPresentation
     ) -> TimeProfileUpdateContext:
         app_ctx = host.state.context
         mod_cfg = host.state.modules.time_profile
@@ -253,8 +283,13 @@ class TimeProfilePipeline:
                     lambda query, session=upper_session
                         : session.query_quanta(query)
                 ),
+                query_spans = (
+                    lambda query, session=upper_session
+                        : session.query_spans(query)
+                ),
             )
         }
+
         if lower_session is not None:
             token_keys.update(lower_session.meta.token_key_to_name.keys())
             trace_context["lower"] = TimeProfileTraceContext(
@@ -267,6 +302,10 @@ class TimeProfilePipeline:
                     lambda query, session=lower_session
                         : session.query_quanta(query)
                 ),
+                query_spans = (
+                    lambda query, session=lower_session
+                        : session.query_spans(query)
+                ),
             )
 
         request_key = (
@@ -274,6 +313,7 @@ class TimeProfilePipeline:
             lower_trace_id,
             active_thread_names,
             trace_mode,
+            presentation,
             mod_cfg.n_bins,
             mod_cfg.fidelity,
             mod_cfg.order,

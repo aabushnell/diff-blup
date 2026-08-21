@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from blup.bokeh.theme import PALETTE
+from blup.state import ThreadName, TimestampNS
 from blup.types import TraceMode
 from bokeh.io import curdoc
 from bokeh.layouts import column
@@ -15,7 +16,24 @@ from bokeh.models.ranges import Range1d
 from bokeh.models.tools import HoverTool, TapTool
 from bokeh.plotting import ColumnDataSource, figure
 
-from blup.modules.time_profile.types import TraceSide
+from blup.modules.time_profile.types import FLAME_MAX_DEPTH, ResolvedPresentation, TraceSide
+
+
+def _empty_quanta_source() -> dict:
+    return dict(
+        left            = [],
+        right           = [],
+        top             = [],
+        bottom          = [],
+        color           = [],
+        token_key       = [],
+        token_name      = [],
+        token_type      = [],
+        token_id        = [],
+        thread          = [],
+        proportion      = [],
+        exclusive_s     = [],
+    )
 
 
 class TimeProfileChartSurface:
@@ -218,13 +236,17 @@ class TimeProfileChartSurface:
 
             s1.selected.on_change(
                 "indices",
-                (lambda attr, old, new, source
-                    = s1: self.on_source_selected(source, new)),
+                (
+                    lambda attr, old, new, source=s1
+                        : self.on_source_selected(source, new)
+                ),
             )
             s2.selected.on_change(
                 "indices",
-                (lambda attr, old, new, source
-                    = s2: self.on_source_selected(source, new)),
+                (
+                    lambda attr, old, new, source=s2
+                        : self.on_source_selected(source, new)
+                ),
             )
 
             self.sources1[thread_name] = s1
@@ -260,9 +282,10 @@ class TimeProfileChartSurface:
 
             self.renderers1[thread_name] = r1
             self.renderers2[thread_name] = r2
-            self.register_hover_renderers(r1, r2)
 
-    def register_hover_renderers(self, *renderers: Any) -> None:
+            self._register_hover_renderers(r1, r2)
+
+    def _register_hover_renderers(self, *renderers: Any) -> None:
         if self.hover is None:
             return
         current = list(self.hover.renderers)
@@ -272,11 +295,12 @@ class TimeProfileChartSurface:
     def prepare_display(
         self,
         *,
-        active_thread_names: list[str],
-        start_ns: int,
-        end_ns: int,
+        active_thread_names: list[ThreadName],
+        start_ns: TimestampNS,
+        end_ns: TimestampNS,
         sync_range_to_fig: bool,
         trace_mode: TraceMode,
+        presentation: ResolvedPresentation,
     ) -> None:
         fig = self.fig
         if fig is None:
@@ -284,17 +308,39 @@ class TimeProfileChartSurface:
                 "TimeProfileChartSurface.build() "
                     + "must be called before prepare_display()"
             )
+        if presentation not in ("binned", "gantt", "flame"):
+            raise ValueError(f"invalid presentation: {presentation!r}")
 
         self._ensure_threads(active_thread_names)
 
-        fig.y_range.factors = list(reversed(active_thread_names))           # type: ignore[attr-defined]
+        if presentation == "flame":
+            rows_per_thread = FLAME_MAX_DEPTH + 1
+            factors = [
+                f"{t} d{d}"
+                for t in active_thread_names
+                for d in range(rows_per_thread)
+            ]
+        else:
+            factors = list(reversed(active_thread_names))
+
+        fig.y_range.factors = factors                                       # type: ignore[attr-defined]
+
+        if fig.title:
+            fig.title.text = (                                              # type: ignore[attr-defined]
+                "Time profile"
+                if presentation == "binned"
+                else "Time profile (gantt)"
+                if presentation == "gantt"
+                else "Time profile (flame)"
+            )
+
         if sync_range_to_fig:
             fig.x_range.start = start_ns / 1e6                              # type: ignore[attr-defined]
             fig.x_range.end = end_ns / 1e6                                  # type: ignore[attr-defined]
 
-        self.clear_all_sources(active_thread_names, trace_mode)
+        self._clear_all_sources(active_thread_names, trace_mode)
 
-    def clear_all_sources(
+    def _clear_all_sources(
         self,
         active_thread_names: list[str],
         trace_mode: TraceMode
@@ -305,9 +351,10 @@ class TimeProfileChartSurface:
         for thread_name in known_threads:
             self.sources1[thread_name].data = _empty_quanta_source()
             self.sources2[thread_name].data = _empty_quanta_source()
-            self.renderers1[thread_name].visible = thread_name in active    # type: ignore
-            self.renderers2[thread_name].visible = (trace_mode == "dual"    # type: ignore
-                                                    and thread_name in active)
+            self.renderers1[thread_name].visible = thread_name in active    # type: ignore[attr-defined]
+            self.renderers2[thread_name].visible = (                        # type: ignore[attr-defined]
+                trace_mode == "dual" and thread_name in active
+            )
 
     def apply_job_result(
         self,
@@ -345,18 +392,3 @@ class TimeProfileChartSurface:
         if self.on_token_selected is not None:
             self.on_token_selected(token)
 
-def _empty_quanta_source() -> dict:
-    return dict(
-        left            = [],
-        right           = [],
-        top             = [],
-        bottom          = [],
-        color           = [],
-        token_key       = [],
-        token_name      = [],
-        token_type      = [],
-        token_id        = [],
-        thread          = [],
-        proportion      = [],
-        exclusive_s     = [],
-    )
