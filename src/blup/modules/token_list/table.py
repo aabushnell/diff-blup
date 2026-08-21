@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Callable
 
-from blup.state import TokenListOrder, TokenListSortDirection
-from blup.types import TokenKey, TraceMode
+from blup.bokeh.styles import style_widget
 from bokeh.io import curdoc
 from bokeh.layouts import column, row
+from bokeh.models.css import InlineStyleSheet
 from bokeh.models.layouts import LayoutDOM
 from bokeh.models.widgets.inputs import Select
 from bokeh.models.widgets.tables import (
@@ -15,7 +15,10 @@ from bokeh.models.widgets.tables import (
 )
 from bokeh.plotting import ColumnDataSource
 
+from blup.bokeh.theme import PALETTE, make_widget_stylesheet
 from blup.modules.token_list.types import TokenListResult
+from blup.state import TokenListOrder, TokenListSortDirection
+from blup.types import TokenKey, TraceMode
 
 
 _ORDER_OPTIONS: list[tuple[TokenListOrder, str]] = [
@@ -33,7 +36,7 @@ _DIRECTION_OPTIONS: list[tuple[TokenListSortDirection, str]] = [
 
 _COLOR_CHIP_TEMPLATE = (
     '<div style="width:14px; height:14px; margin:2px;'
-    "background:<%= color %>; border:1px solid #665c54;"
+    "background:<%= color %>; border:1px solid #504945;"
     '"></div>'
 )
 
@@ -53,6 +56,60 @@ def _empty_source() -> dict:
         "share":        [],
     }
 
+def _make_table_stylesheet() -> InlineStyleSheet:
+    p = PALETTE
+    return InlineStyleSheet(
+        css=f"""
+        :host {{
+            background: {p.bg1};
+            color: {p.fg1};
+            font-family: monospace;
+            font-size: 11px;
+        }}
+
+        :host .slick-header {{
+            background: {p.bg2};
+            border-bottom: 2px solid {p.bg3};
+        }}
+        :host .slick-header-column {{
+            background: {p.bg2};
+            color: {p.muted};
+            font-family: monospace;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border-right: 1px solid {p.bg3};
+        }}
+        :host .slick-header-column:hover {{
+            color: {p.yellow};
+        }}
+
+        :host .slick-row {{
+            background: {p.bg1};
+            color: {p.fg1};
+            border: none;
+        }}
+        :host .slick-row.odd {{
+            background: {p.bg0};
+        }}
+        :host .slick-row:hover {{
+            background: {p.bg2};
+        }}
+        :host .slick-row.active {{
+            background: {p.bg3};
+            color: {p.fg0};
+        }}
+        :host .slick-cell {{
+            border: none;
+            border-bottom: 1px solid {p.bg2};
+            font-family: monospace;
+            font-size: 11px;
+        }}
+        :host .slick-cell.selected {{
+            background: {p.bg3};
+        }}
+        """
+    )
 
 class TokenListTable:
 
@@ -91,16 +148,20 @@ class TokenListTable:
             title       = "Order by",
             value       = "delta",
             options     = _ORDER_OPTIONS,                                   # type: ignore[attr-defined]
-            width       = 150,
+            sizing_mode = "stretch_width",
+            stylesheets = [make_widget_stylesheet()],
         )
+        style_widget(self.order_select)
         self.order_select.on_change("value", self._on_order_widget)
 
         self.direction_select = Select(
             title       = "Direction",
             value       = "descending",
             options     = _DIRECTION_OPTIONS,                               # type: ignore[attr-defined]
-            width       = 90,
+            sizing_mode = "stretch_width",
+            stylesheets = [make_widget_stylesheet()],
         )
+        style_widget(self.direction_select)
         self.direction_select.on_change("value", self._on_direction_widget)
 
         color_formatter = HTMLTemplateFormatter(template=_COLOR_CHIP_TEMPLATE)
@@ -108,7 +169,7 @@ class TokenListTable:
         col_color = TableColumn(
             field       = "color",
             title       = "",
-            width       = 30,
+            width       = 6,
             formatter   = color_formatter,
         )
         col_name = TableColumn(
@@ -118,30 +179,35 @@ class TokenListTable:
         col_id = TableColumn(
             field       = "id_label",
             title       = "ID",
-            width       = 70,
+            width       = 40,
         )
         col_excl_upper = TableColumn(
             field       = "excl_upper",
             title       = "Excl (upper)",
-            width       = 90,
+            width       = 100,
         )
         col_excl_lower = TableColumn(
             field       = "excl_lower",
             title       = "Excl (lower)",
-            width       = 90,
+            width       = 100,
         )
         col_delta = TableColumn(
             field       = "delta_excl",
             title       = "Delta excl",
-            width       = 90,
+            width       = 100,
         )
         col_share = TableColumn(
             field       = "share",
             title       = "Share",
-            width       = 70,
+            width       = 60,
         )
 
-        self._single_columns = [col_color, col_name, col_id, col_excl_upper]
+        self._single_columns = [
+            col_color,
+            col_name,
+            col_id,
+            col_excl_upper
+        ]
         self._dual_columns = [
             col_color,
             col_name,
@@ -161,6 +227,7 @@ class TokenListTable:
             index_position  = None,
             row_height      = 26,
             sizing_mode     = "stretch_both",
+            stylesheets     = [_make_table_stylesheet()],
         )
         self.source.selected.on_change("indices", self._on_source_selected)
 

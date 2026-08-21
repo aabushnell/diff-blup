@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Hashable, Literal, Protocol, Sequence, Union
 
 from blup.data_model import (
@@ -15,6 +15,7 @@ from blup.data_model import (
 )
 from blup.state import TokenDetailChartMode
 from blup.types import (
+    ColorHex,
     DurationNS,
     ThreadID,
     ThreadName,
@@ -81,6 +82,7 @@ class TokenDetailDiffRow:
 class TokenDetailTableModel:
     title:                  str
     subtitle:               str
+    color:                  ColorHex
     metric:                 tuple[str, ...]
     upper:                  tuple[str, ...]
     lower:                  tuple[str, ...]
@@ -114,6 +116,9 @@ class TokenDetailUpdateContext:
     token_mode:             TokenMode
     top_k:                  int | None
     histogram_bins:         int
+    color_map:              dict[TokenKey, ColorHex] = field(
+        default_factory = dict
+    )
 
 
 @dataclass(frozen=True)

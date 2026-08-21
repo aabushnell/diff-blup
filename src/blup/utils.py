@@ -87,10 +87,10 @@ def format_duration_ns(value: float) -> str:
     if x < 1_000:
         return f"{sign}{x:.0f} ns"
     if x < 1_000_000:
-        return f"{sign}{x / 1_000:.3f} us"
+        return f"{sign}{x / 1_000:.1f} us"
     if x < 1_000_000_000:
-        return f"{sign}{x / 1_000_000:.3f} ms"
-    return f"{sign}{x / 1_000_000_000:.3f} s"
+        return f"{sign}{x / 1_000_000:.1f} ms"
+    return f"{sign}{x / 1_000_000_000:.1f} s"
 
 def format_duration_delta_ns(value: float) -> str:
     if value == 0:
@@ -100,10 +100,10 @@ def format_duration_delta_ns(value: float) -> str:
     if x < 1_000:
         return f"{sign}{x:.0f} ns"
     if x < 1_000_000:
-        return f"{sign}{x / 1_000:.3f} us"
+        return f"{sign}{x / 1_000:.1f} us"
     if x < 1_000_000_000:
-        return f"{sign}{x / 1_000_000:.3f} ms"
-    return f"{sign}{x / 1_000_000_000:.3f} s"
+        return f"{sign}{x / 1_000_000:.1f} ms"
+    return f"{sign}{x / 1_000_000_000:.1f} s"
 
 
 class DataCache[K, V]:

@@ -660,8 +660,7 @@ class TraceSession:
         dur_ns = np.array([r[3] for r in rows], dtype=np.int64)
 
         n = len(rows)
-        if n == 0:
-            keep = np.array([], dtype=np.int64)
+        keep = np.array([], dtype=np.int64)
         if query.mode == "all":
             keep = np.arange(n, dtype=np.int64)
         if query.mode == "first":
@@ -677,7 +676,6 @@ class TraceSession:
         if query.mode == "median":
             median = np.median(dur_ns)
             keep = np.array([int(np.argmin(np.abs(dur_ns - median)))], dtype=np.int64)
-        raise ValueError(f"unknown occurrence mode: {query.mode}")
 
         if query.mode == "all" and query.fidelity != "exact":
             if query.max_points is None or len(keep) <= query.max_points:

@@ -39,6 +39,14 @@ _METRIC_NAMES = (
     "Total exclusive",
 )
 
+def _table_model_color(
+    update: TokenDetailUpdate,
+    selected_token: TokenKey | None,
+) -> str:
+    if selected_token is None:
+        return ""
+    key = as_token_key(selected_token[0], selected_token[1])
+    return update.context.color_map.get(key, "#999999")
 
 def _thread_ids_for(
     trace_ctx: TokenDetailTraceContext,
@@ -137,6 +145,7 @@ class TokenDetailAssembler:
         model = self._build_table_model(
             rows,
             selected_token  = update.selected_token,
+            color           = _table_model_color(update, update.selected_token),
             dual_mode       = lower_ctx is not None,
             upper_label     = upper_ctx.label,
             lower_label     = "" if lower_ctx is None else lower_ctx.label,
@@ -264,6 +273,7 @@ class TokenDetailAssembler:
         rows: tuple[TokenDetailDiffRow, ...],
         *,
         selected_token: TokenKey | None,
+        color: str,
         dual_mode: bool,
         upper_label: str,
         lower_label: str,
@@ -272,23 +282,25 @@ class TokenDetailAssembler:
 
         if row is None:
             return TokenDetailTableModel(
-                title="Token detail",
-                subtitle="No token selected",
-                metric=(),
-                upper=(),
-                lower=(),
-                delta=(),
-                percent=(),
-                dual_mode=dual_mode,
-                upper_label=upper_label,
-                lower_label=lower_label,
+                title           = "Token detail",
+                subtitle        = "No token selected",
+                color           = "",
+                metric          = (),
+                upper           = (),
+                lower           = (),
+                delta           = (),
+                percent         = (),
+                dual_mode       = dual_mode,
+                upper_label     = upper_label,
+                lower_label     = lower_label,
             )
 
         return TokenDetailTableModel(
-            title="Token detail",
-            subtitle=f"{row.name} ({row.token_type}:{row.token_id})",
-            metric=_METRIC_NAMES,
-            upper=(
+            title           = "Token detail",
+            subtitle        = f"{row.name} ({row.token_type}:{row.token_id})",
+            color           = color,
+            metric          = _METRIC_NAMES,
+            upper           = (
                 "—",
                 "—",
                 "—",
@@ -298,7 +310,7 @@ class TokenDetailAssembler:
                 format_duration_ns(row.incl_total_ns_upper),
                 format_duration_ns(row.excl_total_ns_upper),
             ),
-            lower=(
+            lower           = (
                 "—",
                 "—",
                 "—",
@@ -308,7 +320,7 @@ class TokenDetailAssembler:
                 format_duration_ns(row.incl_total_ns_lower),
                 format_duration_ns(row.excl_total_ns_lower),
             ),
-            delta=(
+            delta           = (
                 f"#{row.contribution_rank}",
                 format_duration_ns(row.contribution_abs_ns),
                 "—",
@@ -318,7 +330,7 @@ class TokenDetailAssembler:
                 format_duration_delta_ns(row.delta_incl_total_ns),
                 format_duration_delta_ns(row.delta_excl_total_ns),
             ),
-            percent=(
+            percent         = (
                 "—",
                 "—",
                 f"{row.contribution_share_pct:.1f}%",
@@ -336,9 +348,9 @@ class TokenDetailAssembler:
                     row.excl_total_ns_upper, row.excl_total_ns_lower
                 ),
             ),
-            dual_mode=dual_mode,
-            upper_label=upper_label,
-            lower_label=lower_label,
+            dual_mode       = dual_mode,
+            upper_label     = upper_label,
+            lower_label     = lower_label,
         )
 
     def _run_histogram_job(

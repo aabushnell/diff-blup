@@ -262,7 +262,7 @@ class AppController:
                     context_key     = "main",
                     side            = "center",
                 ),
-                context = context_testing,
+                context = context_default,
                 inspector = PanelState(
                     active_module   = "token_detail",
                     context_key     = "detail",

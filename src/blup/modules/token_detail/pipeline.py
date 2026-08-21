@@ -234,6 +234,11 @@ class TokenDetailPipeline:
             end_ns,
         )
 
+        token_keys = set(upper_session.meta.token_key_to_name.keys())
+        if lower_session is not None:
+          token_keys.update(lower_session.meta.token_key_to_name.keys())
+        color_map = dict(host.token_color.snapshot(token_keys).color_map)
+
         return TokenDetailUpdateContext(
             request_key     = request_key,
             trace_context   = trace_context,
@@ -241,6 +246,7 @@ class TokenDetailPipeline:
             token_mode      = app_ctx.token_mode,
             top_k           = mod_cfg.top_k,
             histogram_bins  = mod_cfg.n_bins,
+            color_map       = color_map,
         )
 
     def _trace_context_for(
